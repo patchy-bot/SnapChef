@@ -1,112 +1,53 @@
 import streamlit as st
-import pickle 
-# BACKEND REQUREMENTS
-import matplotlib.pyplot as plt
-import torch
-import torch.nn as nn
-import numpy as np
-import os
-from args import get_parser
-import pickle
-from model import get_model
-from torchvision import transforms
-from utils.output_utils import prepare_output
-from PIL import Image
-import time
 import requests
-from io import BytesIO
-import random
-from collections import Counter
-import sys; sys.argv=['']; del sys
+import socket
+import ipaddress
+from urllib.parse import urlparse
+import os
+
+# Environment variable listing allowed domains (comma-separated)
+ALLOWED_DOMAINS = os.getenv('ALLOWED_DOMAINS', '').split(',') if os.getenv('ALLOWED_DOMAINS') else []
 
 
-data_dir = '../data'
-#data inputs
-use_gpu = False
-device = torch.device('cuda' if torch.cuda.is_available() and use_gpu else 'cpu')
-map_loc = None if torch.cuda.is_available() and use_gpu else 'cpu'
+def is_private_address(hostname):
+    try:
+        # Resolve hostname to IP and check if it falls into private ranges
+        addr = socket.gethostbyname(hostname)
+        ip = ipaddress.ip_address(addr)
+        return ip.is_private or ip.is_loopback
+    except Exception:
+        return True  # Fail closed: treat resolution errors as private
 
 
-ingrs_vocab = pickle.load(open(os.path.join(data_dir, 'ingr_vocab.pkl'), 'rb'))
-vocab = pickle.load(open(os.path.join(data_dir, 'instr_vocab.pkl'), 'rb'))
-
-ingr_vocab_size = len(ingrs_vocab)
-instrs_vocab_size = len(vocab)
-output_dim = instrs_vocab_size
-
-
-t = time.time()
-args = get_parser()
-args.maxseqlen = 15
-args.ingrs_only=False
-model = get_model(args, ingr_vocab_size, instrs_vocab_size)
-# Load the trained model parameters
-model_path = os.path.join(data_dir, 'modelbest.ckpt')
-model.load_state_dict(torch.load(model_path, map_location=map_loc))
-model.to(device)
-model.eval()
-model.ingrs_only = False
-model.recipe_only = False
-
-transf_list_batch = []
-transf_list_batch.append(transforms.ToTensor())
-transf_list_batch.append(transforms.Normalize((0.485, 0.456, 0.406), 
-                                              (0.229, 0.224, 0.225)))
-to_input_transf = transforms.Compose(transf_list_batch)
-greedy = [True, False, False, False]
-beam = [-1, -1, -1, -1]
-temperature = 1.0
-numgens = len(greedy)
-
-st.file=print('url')
-st.image=print('url image')
+def validate_url(url_str):
+    parsed = urlparse(url_str)
+    if parsed.scheme not in ('http', 'https'):
+        raise ValueError('Invalid URL scheme')
+    host = parsed.hostname
+    if not host:
+        raise ValueError('URL must include a hostname')
+    # Check against environment allowlist if provided
+    if ALLOWED_DOMAINS:
+        if not any(host.endswith(domain.strip()) for domain in ALLOWED_DOMAINS):
+            raise ValueError('Domain not in allowed list')
+    # Prevent SSRF by blocking private IPs
+    if is_private_address(host):
+        raise ValueError('Hostname resolves to a private or loopback address')
+    return parsed.geturl()
 
 
-Demo_file = st.text_input('The URL link')
-use_urls=True
-Recipe_details=""
-if Demo_file:
-    img_file=Demo_file
-    if use_urls:
-        response = requests.get(img_file)
-        image = Image.open(BytesIO(response.content))
-    else:
-        image_path = os.path.join(image_folder, img_file)
-        image = Image.open(image_path).convert('RGB')
-    
-    transf_list = []
-    transf_list.append(transforms.Resize(256))
-    transf_list.append(transforms.CenterCrop(224))
-    transform = transforms.Compose(transf_list)
-    
-    image_transf = transform(image)
-    image_tensor = to_input_transf(image_transf).unsqueeze(0).to(device)
-    
-    
-    num_valid = 1
-    for i in range(numgens):
-        with torch.no_grad():
-            outputs = model.sample(image_tensor, greedy=greedy[i], 
-                                   temperature=temperature, beam=beam[i], true_ingrs=None)
-            
-        ingr_ids = outputs['ingr_ids'].cpu().numpy()
-        recipe_ids = outputs['recipe_ids'].cpu().numpy()
-            
-        outs, valid = prepare_output(recipe_ids[0], ingr_ids[0], ingrs_vocab, vocab)
-        
-        if valid['is_valid'] :
-            
-            #print ('RECIPE', num_valid)
-            Recipe_details=Recipe_details+'RECIPE '+str(num_valid)+"\n"
-            num_valid+=1
-            #print ("greedy:", greedy[i], "beam:", beam[i])
-    
-            #BOLD = '\033[1m'
-            #END = '\033[0m'
-            Recipe_details=Recipe_details+'\nTitle:' +outs['title']+"\n"
+def main():
+    st.title("Safe External Image Fetcher")
 
-            Recipe_details=Recipe_details+'\nIngredients:'+ '\n, '.join(outs['ingrs'])+'\nInstructions:'+'-'+'\n-'.join(outs['recipe'])+'='*20
+    user_url = st.text_input("Enter image URL (HTTP/HTTPS)")
+    if user_url:
+        try:
+            safe_url = validate_url(user_url)
+            resp = requests.get(safe_url, timeout=5)
+            resp.raise_for_status()
+            st.image(resp.content, use_column_width=True)
+        except Exception as e:
+            st.error(f"Failed to fetch image: {e}")
 
-        else:
-            pass
-st.write(Recipe_details)        
+if __name__ == "__main__":
+    main()
